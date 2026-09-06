@@ -71,7 +71,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
+@app.get("/", status_code=status.HTTP_200_OK)
+def root():
+    return {
+        "service": "Credit Risk Scoring & Adverse Action API",
+        "status": "online",
+        "docs_url": "/docs",
+        "health_check": "/health"
+    }
 @app.get("/health", status_code=status.HTTP_200_OK)
 def health_check():
     return {
