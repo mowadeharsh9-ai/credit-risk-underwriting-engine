@@ -1,28 +1,105 @@
+import os
 import streamlit as st
 import requests
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import os
+from typing import Tuple
 
-# Dynamic routing: checks Streamlit Cloud Secrets, environment variables, or defaults to localhost
-if "API_URL" in st.secrets:
-    API_URL = st.secrets["API_URL"]
-else:
-    API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 st.set_page_config(
     page_title="Credit Underwriting & Risk Engine",
     page_icon="💳",
     layout="wide",
 )
 
+# Dynamic routing: priority to Streamlit secrets, then env vars, then localhost
+if "API_URL" in st.secrets:
+    API_URL = st.secrets["API_URL"]
+else:
+    API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+
+# -------------------------------------------------------------
+# GOVERNANCE & AUDIT LOGIC (SELF-CONTAINED)
+# -------------------------------------------------------------
+def calculate_disparate_impact(
+    df: pd.DataFrame, 
+    protected_attr: str, 
+    decision_col: str, 
+    favorable_outcome: str = "APPROVED"
+) -> pd.DataFrame:
+    groups = df[protected_attr].unique()
+    group_stats = {}
+    for group in groups:
+        group_df = df[df[protected_attr] == group]
+        total = len(group_df)
+        approved = len(group_df[group_df[decision_col] == favorable_outcome])
+        approval_rate = approved / total if total > 0 else 0.0
+        group_stats[group] = {
+            "total_applicants": total,
+            "approved": approved,
+            "approval_rate": approval_rate
+        }
+
+    max_rate = max(s["approval_rate"] for s in group_stats.values()) if group_stats else 1.0
+    summary = []
+    for group, stats in group_stats.items():
+        dir_ratio = stats["approval_rate"] / max_rate if max_rate > 0 else 1.0
+        violates_rule = dir_ratio < 0.80
+        summary.append({
+            "demographic_group": str(group),
+            "total_applicants": stats["total_applicants"],
+            "approvals": stats["approved"],
+            "approval_rate": f"{stats['approval_rate'] * 100:.2f}%",
+            "disparate_impact_ratio": round(dir_ratio, 3),
+            "four_fifths_compliance": "PASS" if not violates_rule else "FAIL (Adverse Impact)"
+        })
+    return pd.DataFrame(summary).sort_values(by="disparate_impact_ratio", ascending=False)
+
+
+def calculate_psi(
+    expected: np.ndarray, 
+    actual: np.ndarray, 
+    num_buckets: int = 10
+) -> Tuple[float, pd.DataFrame]:
+    percentiles = np.linspace(0, 100, num_buckets + 1)
+    bucket_bounds = np.percentile(expected, percentiles)
+    bucket_bounds[0] = -np.inf
+    bucket_bounds[-1] = np.inf
+
+    expected_counts, _ = np.histogram(expected, bins=bucket_bounds)
+    actual_counts, _ = np.histogram(actual, bins=bucket_bounds)
+
+    expected_pct = np.maximum(expected_counts / len(expected), 1e-4)
+    actual_pct = np.maximum(actual_counts / len(actual), 1e-4)
+
+    psi_values = (actual_pct - expected_pct) * np.log(actual_pct / expected_pct)
+    total_psi = float(np.sum(psi_values))
+
+    breakdown = pd.DataFrame({
+        "Decile Bucket": range(1, num_buckets + 1),
+        "Baseline Expected %": np.round(expected_pct * 100, 2),
+        "Production Actual %": np.round(actual_pct * 100, 2),
+        "Bucket PSI Contribution": np.round(psi_values, 4)
+    })
+    return round(total_psi, 4), breakdown
+
+
+def evaluate_psi_status(psi_value: float) -> str:
+    if psi_value < 0.10:
+        return "STABLE: Portfolio distribution aligns with training baseline"
+    elif psi_value < 0.25:
+        return "WARNING: Moderate distribution shift detected"
+    else:
+        return "CRITICAL: Severe distribution drift. Retraining / Recalibration required"
+
+# -------------------------------------------------------------
+# UI LAYOUT
+# -------------------------------------------------------------
 st.title("💳 Institutional Credit Underwriting & Model Governance")
 
 tabs = st.tabs(["🚀 Real-Time Underwriting", "⚖️ Fair Lending Audit", "📈 Population Drift (PSI)"])
 
-# -------------------------------------------------------------
 # TAB 1: REAL-TIME UNDERWRITING
-# -------------------------------------------------------------
 with tabs[0]:
     st.markdown("Automated credit risk assessment with Fair Lending Adverse Action explanations (SHAP).")
 
@@ -67,7 +144,10 @@ with tabs[0]:
             }
 
             try:
-                response = requests.post(f"{API_URL}/v1/underwrite", json=payload, timeout=15)
+                target_endpoint = f"{API_URL.rstrip('/')}/v1/underwrite"
+                with st.spinner("Executing model pipeline and local explainability..."):
+                    response = requests.post(target_endpoint, json=payload, timeout=20)
+
                 if response.status_code == 200:
                     data = response.json()
                     decision = data["decision"]
@@ -82,8 +162,8 @@ with tabs[0]:
                         st.error(f"### Decision: {decision}\nCredit Score: **{score}** (PD: {pd_val:.2%})")
 
                     m1, m2 = st.columns(2)
-                    m1.metric("Est. Probability of Default", f"{pd_val:.2%}")
-                    m2.metric("Business Cutoff Threshold", f"{data['decision_threshold']:.2%}")
+                    m1.metric("Calibrated Default Probability", f"{pd_val:.2%}")
+                    m2.metric("Institutional Cutoff Threshold", f"{data['decision_threshold']:.2%}")
 
                     if data.get("adverse_action_reasons"):
                         st.subheader("Regulatory Adverse Action Notice")
@@ -108,16 +188,12 @@ with tabs[0]:
                 else:
                     st.error(f"Validation error: {response.json().get('detail')}")
             except Exception as e:
-                st.error(f"Failed to connect to API backend: {e}")
+                st.error(f"Failed to connect to API backend at `{API_URL}`: {e}")
 
-# -------------------------------------------------------------
 # TAB 2: FAIR LENDING BIAS AUDIT
-# -------------------------------------------------------------
 with tabs[1]:
     st.subheader("Fair Lending Disparate Impact Audit (CFPB / ECOA Reg B)")
-    st.markdown("Auditing underwriting outcomes across protected classes to prevent algorithmic bias using the **Four-Fifths (80%) Rule**.")
-
-    from src.explainability.bias_audit import calculate_disparate_impact
+    st.markdown("Auditing underwriting outcomes across protected classes to evaluate algorithmic fairness using the **Four-Fifths (80%) Rule**.")
 
     np.random.seed(42)
     audit_data = pd.DataFrame({
@@ -128,14 +204,10 @@ with tabs[1]:
     audit_summary = calculate_disparate_impact(audit_data, protected_attr="age_bracket", decision_col="underwriting_decision")
     st.dataframe(audit_summary, use_container_width=True)
 
-# -------------------------------------------------------------
 # TAB 3: POPULATION DRIFT (PSI)
-# -------------------------------------------------------------
 with tabs[2]:
     st.subheader("Production Score Drift Monitoring (PSI)")
     st.markdown("Quantifying distributional drift between training baseline and incoming live applicant default scores.")
-
-    from src.models.monitoring import calculate_psi, evaluate_psi_status
 
     np.random.seed(42)
     baseline_scores = np.random.beta(2, 10, size=3000)
