@@ -3,7 +3,13 @@ import requests
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 
+# Dynamic routing: checks Streamlit Cloud Secrets, environment variables, or defaults to localhost
+if "API_URL" in st.secrets:
+    API_URL = st.secrets["API_URL"]
+else:
+    API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 st.set_page_config(
     page_title="Credit Underwriting & Risk Engine",
     page_icon="💳",
@@ -61,7 +67,7 @@ with tabs[0]:
             }
 
             try:
-                response = requests.post("http://127.0.0.1:8000/v1/underwrite", json=payload, timeout=5)
+                response = requests.post(f"{API_URL}/v1/underwrite", json=payload, timeout=15)
                 if response.status_code == 200:
                     data = response.json()
                     decision = data["decision"]
