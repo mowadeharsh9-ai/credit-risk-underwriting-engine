@@ -1,6 +1,11 @@
+import numpy as np
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+from src.explainability.bias_audit import calculate_disparate_impact
+from src.models.monitoring import calculate_psi
 
 
 @pytest.fixture(scope="module")
@@ -71,3 +76,22 @@ def test_schema_validation_error(client):
     }
     response = client.post("/v1/underwrite", json=invalid_payload)
     assert response.status_code == 422
+
+
+def test_fair_lending_four_fifths_audit():
+    test_df = pd.DataFrame({
+        "group": ["A", "A", "B", "B"],
+        "decision": ["APPROVED", "APPROVED", "APPROVED", "REJECTED"],
+    })
+    result = calculate_disparate_impact(test_df, protected_attr="group", decision_col="decision")
+    assert "disparate_impact_ratio" in result.columns
+    assert len(result) == 2
+
+
+def test_psi_calculation_stability():
+    np.random.seed(42)
+    baseline = np.random.normal(0.1, 0.02, 1000)
+    current = np.random.normal(0.1, 0.02, 1000)
+    psi, breakdown = calculate_psi(baseline, current)
+    assert psi < 0.10
+    assert not breakdown.empty
