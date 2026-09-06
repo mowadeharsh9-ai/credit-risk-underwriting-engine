@@ -12,6 +12,19 @@ from src.api.schemas import (
     AdverseActionReason,
 )
 
+FEATURE_COLUMNS = [
+    "annual_income",
+    "loan_amount",
+    "monthly_installment",
+    "credit_history_months",
+    "inquiries_last_6m",
+    "delinquencies_2y",
+    "revolving_utilization_ratio",
+    "payment_to_income",
+    "debt_to_income",
+    "recent_inquiry_density",
+]
+
 REASON_CODE_MAP = {
     "revolving_utilization_ratio": "Proportion of revolving balances to total credit limits is severely elevated",
     "payment_to_income": "Proposed monthly installment absorbs an unsustainable portion of monthly income",
@@ -27,14 +40,13 @@ artifacts = {
     "model": None,
     "calibrator": None,
     "explainer": None,
-    "feature_names": None,
+    "feature_names": FEATURE_COLUMNS,
     "decision_threshold": 0.10,
 }
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure correct absolute or relative path resolution
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     model_path = os.path.join(base_dir, "models", "lgbm_credit_model.joblib")
     calibrator_path = os.path.join(base_dir, "models", "isotonic_calibrator.joblib")
@@ -43,7 +55,7 @@ async def lifespan(app: FastAPI):
         artifacts["model"] = joblib.load(model_path)
         artifacts["calibrator"] = joblib.load(calibrator_path)
         artifacts["explainer"] = shap.TreeExplainer(artifacts["model"])
-        artifacts["feature_names"] = artifacts["model"].feature_name_
+        artifacts["feature_names"] = FEATURE_COLUMNS
         print(">>> Production LightGBM & Isotonic models loaded successfully.")
     else:
         raise RuntimeError("Trained models not found in models/. Run python -m src.models.train first!")
@@ -58,6 +70,15 @@ app = FastAPI(
     description="Regulatory-compliant credit scoring engine",
     lifespan=lifespan,
 )
+
+
+@app.get("/health", status_code=status.HTTP_200_OK)
+def health_check():
+    return {
+        "status": "healthy",
+        "model_loaded": artifacts["model"] is not None,
+        "explainer_ready": artifacts["explainer"] is not None,
+    }
 
 
 def compute_financial_ratios(payload: CreditApplicationRequest) -> pd.DataFrame:
@@ -102,15 +123,12 @@ def calculate_credit_score(probability_of_default: float) -> int:
 def underwrite_application(application: CreditApplicationRequest):
     features_df = compute_financial_ratios(application)
 
-    # 1. Underwriting Policy Hard Knockouts (Standard institutional risk guards)
     utilization = features_df["revolving_utilization_ratio"].iloc[0]
     loan_to_income = application.loan_amount / application.annual_income
 
-    # 2. Model Probability Estimation
     raw_probs = artifacts["calibrator"].predict_proba(features_df)
     calibrated_pd = float(raw_probs[0, 1])
 
-    # Enforce severe default penalty if hard policy rules fail
     if utilization > 1.2 or loan_to_income > 3.0 or application.inquiries_last_6m >= 10:
         calibrated_pd = max(calibrated_pd, 0.65)
 
@@ -124,22 +142,18 @@ def underwrite_application(application: CreditApplicationRequest):
     else:
         decision = "APPROVED"
 
-    # 3. SHAP Adverse Action Generation
     adverse_reasons = None
     if decision in ["REJECTED", "MANUAL_REVIEW"]:
         shap_values = artifacts["explainer"](features_df)
         contributions = shap_values.values[0]
 
-        # Prioritize true high risk indicators
         risk_drivers = []
         for feat, val in zip(artifacts["feature_names"], contributions):
-            # For credit history, only consider it an adverse reason if it's short (< 36 months)
             if feat == "credit_history_months" and application.credit_history_months > 36:
                 continue
             if val > 0:
                 risk_drivers.append((feat, float(val)))
 
-        # If knockout triggered but SHAP tree didn't capture all non-linearities:
         if utilization > 1.0 and not any(r[0] == "revolving_utilization_ratio" for r in risk_drivers):
             risk_drivers.insert(0, ("revolving_utilization_ratio", 3.5))
         if loan_to_income > 2.0 and not any(r[0] == "loan_amount" for r in risk_drivers):
