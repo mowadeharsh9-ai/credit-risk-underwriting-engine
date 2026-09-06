@@ -1,4 +1,5 @@
 # 💳 Production Credit Risk Scoring & Adverse Action Engine
+[![CI/CD Pipeline](https://github.com/mowadeharsh9-ai/credit-risk-underwriting-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/mowadeharsh9-ai/credit-risk-underwriting-engine/actions/workflows/ci.yml)
 
 An end-to-end, regulatory-compliant credit underwriting platform built with LightGBM, Isotonic Probability Calibration, and Explainable AI (SHAP). The engine evaluates borrower default risk, applies institutional policy knockouts, and automatically generates Equal Credit Opportunity Act (ECOA) / Fair Credit Reporting Act (FCRA) compliant Adverse Action notices.
 
